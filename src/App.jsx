@@ -548,6 +548,96 @@ export default function BreadboardApp() {
   const [showMdPreview, setShowMdPreview] = useState(false);
   const svgRef = useRef(null);
 
+  // Pan & zoom state
+  const [vb, setVb] = useState({ x: 0, y: 0, w: BOARD_W, h: BOARD_H });
+  const [isPanning, setIsPanning] = useState(false);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const panRef = useRef({ startX: 0, startY: 0, vbX: 0, vbY: 0 });
+  const spaceRef = useRef(false);
+
+  const MIN_ZOOM = 0.25; // viewBox can be up to 4x board size
+  const MAX_ZOOM = 5;    // viewBox can be as small as 1/5 board size
+
+  const screenToSvg = useCallback((clientX, clientY) => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const rect = svg.getBoundingClientRect();
+    const scaleX = vb.w / rect.width;
+    const scaleY = vb.h / rect.height;
+    return { x: vb.x + (clientX - rect.left) * scaleX, y: vb.y + (clientY - rect.top) * scaleY };
+  }, [vb]);
+
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
+    const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+    setVb((prev) => {
+      const newW = prev.w * zoomFactor;
+      const newH = prev.h * zoomFactor;
+      if (newW > BOARD_W / MIN_ZOOM || newW < BOARD_W / MAX_ZOOM) return prev;
+      const svg = svgRef.current;
+      if (!svg) return prev;
+      const rect = svg.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const my = (e.clientY - rect.top) / rect.height;
+      return {
+        x: prev.x - (newW - prev.w) * mx,
+        y: prev.y - (newH - prev.h) * my,
+        w: newW,
+        h: newH,
+      };
+    });
+  }, []);
+
+  const handlePanStart = useCallback((e) => {
+    if (e.button === 1 || spaceRef.current) {
+      e.preventDefault();
+      setIsPanning(true);
+      panRef.current = { startX: e.clientX, startY: e.clientY, vbX: vb.x, vbY: vb.y };
+    }
+  }, [vb]);
+
+  const handlePanMove = useCallback((e) => {
+    if (!isPanning) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const dx = (e.clientX - panRef.current.startX) * (vb.w / rect.width);
+    const dy = (e.clientY - panRef.current.startY) * (vb.h / rect.height);
+    setVb((prev) => ({ ...prev, x: panRef.current.vbX - dx, y: panRef.current.vbY - dy }));
+  }, [isPanning, vb.w, vb.h]);
+
+  const handlePanEnd = useCallback(() => { setIsPanning(false); }, []);
+
+  const resetView = useCallback(() => {
+    setVb({ x: 0, y: 0, w: BOARD_W, h: BOARD_H });
+  }, []);
+
+  // Spacebar for pan mode
+  useEffect(() => {
+    const down = (e) => { if (e.code === "Space" && !e.repeat && e.target === document.body) { e.preventDefault(); spaceRef.current = true; setSpaceHeld(true); } };
+    const up = (e) => { if (e.code === "Space") { spaceRef.current = false; setSpaceHeld(false); setIsPanning(false); } };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+  }, []);
+
+  // Global mouse up to end pan even if cursor leaves SVG
+  useEffect(() => {
+    if (isPanning) {
+      window.addEventListener("mousemove", handlePanMove);
+      window.addEventListener("mouseup", handlePanEnd);
+      return () => { window.removeEventListener("mousemove", handlePanMove); window.removeEventListener("mouseup", handlePanEnd); };
+    }
+  }, [isPanning, handlePanMove, handlePanEnd]);
+
+  // Attach wheel handler with passive: false for preventDefault
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    svg.addEventListener("wheel", handleWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", handleWheel);
+  }, [handleWheel]);
+
   const pushHistory = useCallback(() => {
     setHistory((h) => [...h.slice(-30), JSON.stringify(wires)]);
   }, [wires]);
@@ -745,6 +835,7 @@ export default function BreadboardApp() {
           <button className="tool-btn" onClick={clearAll}>Clear All</button>
           <button className="tool-btn" onClick={() => setShowPinRef(!showPinRef)}>{showPinRef ? "Hide" : "📌"} Pins</button>
           <div style={{ width: 1, background: "#333", margin: "0 2px" }} />
+          <button className="tool-btn" onClick={resetView} style={{ opacity: (vb.x !== 0 || vb.y !== 0 || vb.w !== BOARD_W) ? 1 : 0.4 }}>⊞ Reset View</button>
           <button className="tool-btn accent" onClick={() => setViewMode("schematic")}>⚙ Schematic</button>
           <button className="tool-btn accent" onClick={() => setShowMdPreview(true)}>📄 Preview .md</button>
           <button className="tool-btn accent" onClick={doDownloadMd}>⬇ Export .md</button>
@@ -762,9 +853,11 @@ export default function BreadboardApp() {
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         {/* Main board */}
-        <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
-          <svg ref={svgRef} viewBox={`0 0 ${BOARD_W} ${BOARD_H}`} width={BOARD_W * 1.5} height={BOARD_H * 1.5}
-            style={{ display: "block" }} onContextMenu={(e) => e.preventDefault()}>
+        <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+          <svg ref={svgRef} viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`}
+            style={{ display: "block", width: "100%", height: "100%", cursor: isPanning ? "grabbing" : spaceHeld ? "grab" : "default" }}
+            onContextMenu={(e) => e.preventDefault()}
+            onMouseDown={handlePanStart}>
             <rect x={0} y={0} width={BOARD_W} height={BOARD_H} rx={8} fill="#e8e0d0" />
             <rect x={3} y={3} width={BOARD_W - 6} height={BOARD_H - 6} rx={6} fill="#d4cbb8" />
             {(() => {
