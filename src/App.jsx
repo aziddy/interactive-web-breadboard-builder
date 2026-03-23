@@ -20,9 +20,9 @@ const WIRE_COLORS = [
 ];
 
 const ESP32_LEFT_PINS = {
-  15: "X", 16: "X", 17: "X", 18: "GPIO8", 19: "GPIO12", 20: "GPIO13",
-  21: "GPIO10", 22: "GPIO11", 23: "GPIO14", 24: "GPIO15", 25: "GPIO16",
-  26: "GPIO17", 27: "GPIO18", 28: "GPIO20", 29: "5V", 30: "GND",
+  15: "X", 16: "X", 17: "X", 18: "GPIO39", 19: "GPIO32", 20: "GPIO33",
+  21: "GPIO34", 22: "GPIO35", 23: "GPIO25", 24: "GPIO26", 25: "GPIO27",
+  26: "GPIO14", 27: "GPIO12", 28: "GPIO13", 29: "5V", 30: "GND",
 };
 const ESP32_RIGHT_PINS = {
   15: "GND", 16: "GPIO41", 17: "GPIO40", 18: "3.3V", 19: "GPIO39",
@@ -504,6 +504,35 @@ function ESP32Outline() {
 }
 
 
+function ServoConnector({ col, startRow, label }) {
+  const top = getCellPos(col, startRow);
+  const bot = getCellPos(col, startRow + 2);
+  if (!top || !bot) return null;
+  const pad = 4;
+  const x = top.x - CELL_SIZE / 2 - pad;
+  const y = top.y - CELL_SIZE / 2 - pad;
+  const w = CELL_SIZE + pad * 2;
+  const h = bot.y - top.y + CELL_SIZE + pad * 2;
+  const pins = [
+    { row: startRow, color: "#ecc94b" },      // Yellow - Signal
+    { row: startRow + 1, color: "#e53e3e" },   // Red - VCC
+    { row: startRow + 2, color: "#8B5E3C" },   // Brown - GND
+  ];
+  return (
+    <g>
+      <rect x={x} y={y} width={w} height={h} rx={4} fill="#2a2a2a" stroke="#555" strokeWidth={1} opacity={0.9} />
+      {pins.map(({ row, color }) => {
+        const pos = getCellPos(col, row);
+        if (!pos) return null;
+        return <rect key={row} x={pos.x - 4} y={pos.y - 4} width={8} height={8} rx={1.5} fill={color} stroke="#0004" strokeWidth={0.5} />;
+      })}
+      <text x={x + w / 2} y={y - 3} textAnchor="middle" fontSize={5.5} fill="#aaa" fontWeight="bold" fontFamily="monospace">{label}</text>
+      <text x={x + w / 2} y={y + h + 7} textAnchor="middle" fontSize={4} fill="#666" fontFamily="monospace">MG995</text>
+    </g>
+  );
+}
+
+
 // ── Markdown Preview Modal ──
 
 function MarkdownPreview({ markdown, onClose, onDownload }) {
@@ -530,15 +559,37 @@ function MarkdownPreview({ markdown, onClose, onDownload }) {
 }
 
 
+// ── Default wiring: 2x MG995-180 Servo Motors ──
+
+const DEFAULT_WIRES = [
+  // Servo 1 (connector at f1–f3, jumpers from g1–g3 on same bus)
+  { from: { type: "cell", col: "g", row: 1 }, to: { type: "cell", col: "a", row: 23 }, color: "#ecc94b", id: 1 },  // Yellow - Signal → GPIO25
+  { from: { type: "cell", col: "g", row: 2 }, to: { type: "rail", rail: "left+", row: 2 }, color: "#e53e3e", id: 2 },  // Red - VCC
+  { from: { type: "cell", col: "g", row: 3 }, to: { type: "rail", rail: "left-", row: 3 }, color: "#8B5E3C", id: 3 },  // Brown - GND
+  // Servo 2 (connector at f5–f7, jumpers from g5–g7 on same bus)
+  { from: { type: "cell", col: "g", row: 5 }, to: { type: "cell", col: "a", row: 24 }, color: "#ecc94b", id: 4 },  // Yellow - Signal → GPIO26
+  { from: { type: "cell", col: "g", row: 6 }, to: { type: "rail", rail: "left+", row: 6 }, color: "#e53e3e", id: 5 },  // Red - VCC
+  { from: { type: "cell", col: "g", row: 7 }, to: { type: "rail", rail: "left-", row: 7 }, color: "#8B5E3C", id: 6 },  // Brown - GND
+  // Power distribution (GND only — 5V rail fed from external supply, not ESP32)
+  { from: { type: "cell", col: "a", row: 30 }, to: { type: "rail", rail: "left-", row: 30 }, color: "#1a1a2e", id: 7 },  // GND to rail
+];
+
+const DEFAULT_LABELS = {
+  "g1": "S1 SIG", "g2": "S1 VCC", "g3": "S1 GND",
+  "g5": "S2 SIG", "g6": "S2 VCC", "g7": "S2 GND",
+  "left-:30": "GND",
+};
+
+
 // ── Main App ──
 
 export default function BreadboardApp() {
-  const [wires, setWires] = useState([]);
+  const [wires, setWires] = useState(DEFAULT_WIRES);
   const [selectedColor, setSelectedColor] = useState(WIRE_COLORS[0].hex);
   const [wireStart, setWireStart] = useState(null);
   const [hoveredWire, setHoveredWire] = useState(null);
   const [tool, setTool] = useState("wire");
-  const [labels, setLabels] = useState({});
+  const [labels, setLabels] = useState(DEFAULT_LABELS);
   const [labelInput, setLabelInput] = useState("");
   const [labelTarget, setLabelTarget] = useState(null);
   const [history, setHistory] = useState([]);
@@ -722,12 +773,13 @@ export default function BreadboardApp() {
       const espLabel = isEspLeft ? ESP32_LEFT_PINS[row] : isEspRight ? ESP32_RIGHT_PINS[row] : null;
       const isX = espLabel === "X";
       if (row >= 15 && row <= 30 && ["c", "d", "e", "f", "g", "h"].includes(col)) return;
+      const isServoPin = col === "f" && ((row >= 1 && row <= 3) || (row >= 5 && row <= 7));
       const k = `${col}${row}`;
       const isSelected = wireStart && pointKey(wireStart) === k;
       const isHighlight = wireStart && wireStart.type !== "rail" && wireStart.row === row &&
         ((COLS.indexOf(wireStart.col) < 5 && COLS.indexOf(col) < 5) || (COLS.indexOf(wireStart.col) >= 5 && COLS.indexOf(col) >= 5));
-      els.push(<Hole key={k} x={pos.x} y={pos.y} occupied={occupiedPoints.has(k)} isEsp={isEsp} espLabel={espLabel} isX={isX}
-        onClick={() => !isX && handleCellClick({ type: "cell", col, row })} highlight={isHighlight} selected={isSelected} />);
+      els.push(<Hole key={k} x={pos.x} y={pos.y} occupied={occupiedPoints.has(k)} isEsp={isEsp} espLabel={espLabel} isX={isX || isServoPin}
+        onClick={() => !isX && !isServoPin && handleCellClick({ type: "cell", col, row })} highlight={isHighlight} selected={isSelected} />);
     }));
     return els;
   };
@@ -871,6 +923,8 @@ export default function BreadboardApp() {
             {renderRails()}
             {renderMainGrid()}
             <ESP32Outline />
+            <ServoConnector col="f" startRow={1} label="SERVO 1" />
+            <ServoConnector col="f" startRow={5} label="SERVO 2" />
             {wires.map((w) => (
               <WirePath key={w.id} from={w.from} to={w.to} color={w.color}
                 isHovered={hoveredWire === w.id || (ctxMenu && ctxMenu.wireId === w.id)}
