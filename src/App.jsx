@@ -139,6 +139,8 @@ function analyzeNets(wires, labels) {
   }
   // Wires
   for (const w of wires) uf.union(pk(w.from), pk(w.to));
+  // Diode connections
+  for (const d of DIODES) uf.union(pk(d.anode), pk(d.cathode));
 
   // ESP32 pin locations
   const espPinKeys = {};
@@ -532,37 +534,71 @@ function ServoConnector({ col, startRow, label }) {
   );
 }
 
-function DiodeComponent({ col, anodeRow, cathodeRow, label }) {
-  const anodePos = getCellPos(col, anodeRow);
-  const cathodePos = getCellPos(col, cathodeRow);
-  if (!anodePos || !cathodePos) return null;
-  const pad = 4;
-  const x = anodePos.x - CELL_SIZE / 2 - pad;
-  const y = anodePos.y - CELL_SIZE / 2 - pad;
-  const w = CELL_SIZE + pad * 2;
-  const h = cathodePos.y - anodePos.y + CELL_SIZE + pad * 2;
-  const midY = (anodePos.y + cathodePos.y) / 2;
-  const cx = anodePos.x;
+function DiodeComponent({ anodePoint, cathodePoint, label }) {
+  const ap = getPointPos(anodePoint);
+  const cp = getPointPos(cathodePoint);
+  if (!ap || !cp) return null;
+  const dx = cp.x - ap.x, dy = cp.y - ap.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 1) return null;
+  // Unit vector from anode to cathode
+  const ux = dx / dist, uy = dy / dist;
+  // Perpendicular for body width
+  const px = -uy, py = ux;
+  // Body length and half-width
+  const bodyLen = 22, bodyHW = 7;
+  // Body center at midpoint
+  const mx = (ap.x + cp.x) / 2, my = (ap.y + cp.y) / 2;
+  // Body edge points along axis
+  const bAx = mx - ux * bodyLen / 2, bAy = my - uy * bodyLen / 2; // anode edge of body
+  const bCx = mx + ux * bodyLen / 2, bCy = my + uy * bodyLen / 2; // cathode edge of body
+  // Body corner points
+  const corners = [
+    { x: bAx + px * bodyHW, y: bAy + py * bodyHW },
+    { x: bCx + px * bodyHW, y: bCy + py * bodyHW },
+    { x: bCx - px * bodyHW, y: bCy - py * bodyHW },
+    { x: bAx - px * bodyHW, y: bAy - py * bodyHW },
+  ];
+  // Cathode band (stripe near cathode edge)
+  const bandW = 4;
+  const bandStart = bCx - ux * bandW, bandStartY = bCy - uy * bandW;
+  const bandCorners = [
+    { x: bandStart + px * bodyHW, y: bandStartY + py * bodyHW },
+    { x: bCx + px * bodyHW, y: bCy + py * bodyHW },
+    { x: bCx - px * bodyHW, y: bCy - py * bodyHW },
+    { x: bandStart - px * bodyHW, y: bandStartY - py * bodyHW },
+  ];
+  // Diode symbol triangle (points from anode toward cathode)
+  const triSize = 5;
+  const triTip = { x: mx + ux * triSize, y: my + uy * triSize };
+  const triBase1 = { x: mx - ux * triSize + px * triSize, y: my - uy * triSize + py * triSize };
+  const triBase2 = { x: mx - ux * triSize - px * triSize, y: my - uy * triSize - py * triSize };
+  // Bar at cathode side of triangle
+  const barX1 = triTip.x + px * triSize, barY1 = triTip.y + py * triSize;
+  const barX2 = triTip.x - px * triSize, barY2 = triTip.y - py * triSize;
+  // Label offset (perpendicular to body)
+  const lblX = mx + px * (bodyHW + 8), lblY = my + py * (bodyHW + 8);
+  const subLblX = mx - px * (bodyHW + 8), subLblY = my - py * (bodyHW + 8);
   return (
     <g>
-      {/* Outer bounding box */}
-      <rect x={x} y={y} width={w} height={h} rx={4} fill="#2a2a2a" stroke="#555" strokeWidth={1} opacity={0.9} />
+      {/* Anode lead wire */}
+      <line x1={ap.x} y1={ap.y} x2={bAx} y2={bAy} stroke="#aaa" strokeWidth={2} strokeLinecap="round" />
+      {/* Cathode lead wire */}
+      <line x1={bCx} y1={bCy} x2={cp.x} y2={cp.y} stroke="#aaa" strokeWidth={2} strokeLinecap="round" />
       {/* Diode body */}
-      <rect x={cx - 8} y={anodePos.y - 2} width={16} height={cathodePos.y - anodePos.y + 4} rx={3} fill="#1a1a1a" stroke="#444" strokeWidth={0.5} />
-      {/* Cathode band (silver stripe) */}
-      <rect x={cx - 8} y={cathodePos.y - 4} width={16} height={4} rx={1} fill="#c0c0c0" opacity={0.9} />
-      {/* Anode pin indicator */}
-      <rect x={cx - 4} y={anodePos.y - 4} width={8} height={8} rx={1.5} fill="#e53e3e" stroke="#0004" strokeWidth={0.5} />
-      {/* Cathode pin indicator */}
-      <rect x={cx - 4} y={cathodePos.y - 4} width={8} height={8} rx={1.5} fill="#c0c0c0" stroke="#0004" strokeWidth={0.5} />
-      {/* Diode symbol triangle (anode → cathode) */}
-      <polygon points={`${cx - 5},${midY - 4} ${cx + 5},${midY - 4} ${cx},${midY + 3}`} fill="#e53e3e" opacity={0.7} />
+      <polygon points={corners.map(c => `${c.x},${c.y}`).join(" ")} fill="#1a1a1a" stroke="#444" strokeWidth={0.5} />
+      {/* Cathode band */}
+      <polygon points={bandCorners.map(c => `${c.x},${c.y}`).join(" ")} fill="#c0c0c0" opacity={0.9} />
+      {/* Diode symbol triangle */}
+      <polygon points={`${triBase1.x},${triBase1.y} ${triBase2.x},${triBase2.y} ${triTip.x},${triTip.y}`} fill="#e53e3e" opacity={0.7} />
       {/* Diode symbol bar */}
-      <line x1={cx - 5} y1={midY + 3} x2={cx + 5} y2={midY + 3} stroke="#c0c0c0" strokeWidth={1.5} />
-      {/* Label above */}
-      <text x={x + w / 2} y={y - 3} textAnchor="middle" fontSize={5.5} fill="#aaa" fontWeight="bold" fontFamily="monospace">{label}</text>
-      {/* Sub-label below */}
-      <text x={x + w / 2} y={y + h + 7} textAnchor="middle" fontSize={4} fill="#666" fontFamily="monospace">Schottky</text>
+      <line x1={barX1} y1={barY1} x2={barX2} y2={barY2} stroke="#c0c0c0" strokeWidth={1.5} />
+      {/* Pin dots */}
+      <circle cx={ap.x} cy={ap.y} r={3.5} fill="#e53e3e" stroke="#0004" strokeWidth={0.5} />
+      <circle cx={cp.x} cy={cp.y} r={3.5} fill="#c0c0c0" stroke="#0004" strokeWidth={0.5} />
+      {/* Label */}
+      <text x={lblX} y={lblY} textAnchor="middle" dominantBaseline="central" fontSize={5.5} fill="#aaa" fontWeight="bold" fontFamily="monospace">{label}</text>
+      <text x={subLblX} y={subLblY} textAnchor="middle" dominantBaseline="central" fontSize={4} fill="#666" fontFamily="monospace">Schottky</text>
     </g>
   );
 }
@@ -607,17 +643,18 @@ const DEFAULT_WIRES = [
   { from: { type: "cell", col: "g", row: 7 }, to: { type: "rail", rail: "left-", row: 7 }, color: "#8B5E3C", id: 6 },  // Brown - GND
   // Power distribution (GND only — 5V rail fed from external supply, not ESP32)
   { from: { type: "cell", col: "a", row: 30 }, to: { type: "rail", rail: "left-", row: 30 }, color: "#1a1a2e", id: 7 },  // GND to rail
-  // 1N5819 Schottky diode: external 5V → ESP32 5V (reverse-polarity protection)
-  { from: { type: "cell", col: "a", row: 28 }, to: { type: "rail", rail: "left+", row: 28 }, color: "#e53e3e", id: 8 },  // Anode to EXT 5V rail
-  { from: { type: "cell", col: "a", row: 28 }, to: { type: "cell", col: "a", row: 29 }, color: "#888", id: 9 },  // Diode internal (anode → cathode)
 ];
 
 const DEFAULT_LABELS = {
   "g1": "S1 SIG", "g2": "S1 VCC", "g3": "S1 GND",
   "g5": "S2 SIG", "g6": "S2 VCC", "g7": "S2 GND",
   "left-:30": "GND",
-  "a28": "D1 IN", "a29": "D1 OUT", "left+:28": "EXT 5V",
+  "a29": "D1 OUT", "left+:28": "EXT 5V",
 };
+
+const DIODES = [
+  { anode: { type: "rail", rail: "left+", row: 28 }, cathode: { type: "cell", col: "a", row: 29 }, label: "1N5819" },
+];
 
 
 // ── Main App ──
@@ -980,7 +1017,7 @@ export default function BreadboardApp() {
             <ESP32Outline />
             <ServoConnector col="f" startRow={1} label="SERVO 1" />
             <ServoConnector col="f" startRow={5} label="SERVO 2" />
-            <DiodeComponent col="a" anodeRow={28} cathodeRow={29} label="1N5819" />
+            {DIODES.map((d, i) => <DiodeComponent key={i} anodePoint={d.anode} cathodePoint={d.cathode} label={d.label} />)}
             {wires.map((w) => (
               <WirePath key={w.id} from={w.from} to={w.to} color={w.color}
                 isHovered={hoveredWire === w.id || (ctxMenu && ctxMenu.wireId === w.id)}
