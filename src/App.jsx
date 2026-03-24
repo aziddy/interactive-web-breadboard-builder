@@ -532,6 +532,41 @@ function ServoConnector({ col, startRow, label }) {
   );
 }
 
+function DiodeComponent({ col, anodeRow, cathodeRow, label }) {
+  const anodePos = getCellPos(col, anodeRow);
+  const cathodePos = getCellPos(col, cathodeRow);
+  if (!anodePos || !cathodePos) return null;
+  const pad = 4;
+  const x = anodePos.x - CELL_SIZE / 2 - pad;
+  const y = anodePos.y - CELL_SIZE / 2 - pad;
+  const w = CELL_SIZE + pad * 2;
+  const h = cathodePos.y - anodePos.y + CELL_SIZE + pad * 2;
+  const midY = (anodePos.y + cathodePos.y) / 2;
+  const cx = anodePos.x;
+  return (
+    <g>
+      {/* Outer bounding box */}
+      <rect x={x} y={y} width={w} height={h} rx={4} fill="#2a2a2a" stroke="#555" strokeWidth={1} opacity={0.9} />
+      {/* Diode body */}
+      <rect x={cx - 8} y={anodePos.y - 2} width={16} height={cathodePos.y - anodePos.y + 4} rx={3} fill="#1a1a1a" stroke="#444" strokeWidth={0.5} />
+      {/* Cathode band (silver stripe) */}
+      <rect x={cx - 8} y={cathodePos.y - 4} width={16} height={4} rx={1} fill="#c0c0c0" opacity={0.9} />
+      {/* Anode pin indicator */}
+      <rect x={cx - 4} y={anodePos.y - 4} width={8} height={8} rx={1.5} fill="#e53e3e" stroke="#0004" strokeWidth={0.5} />
+      {/* Cathode pin indicator */}
+      <rect x={cx - 4} y={cathodePos.y - 4} width={8} height={8} rx={1.5} fill="#c0c0c0" stroke="#0004" strokeWidth={0.5} />
+      {/* Diode symbol triangle (anode → cathode) */}
+      <polygon points={`${cx - 5},${midY - 4} ${cx + 5},${midY - 4} ${cx},${midY + 3}`} fill="#e53e3e" opacity={0.7} />
+      {/* Diode symbol bar */}
+      <line x1={cx - 5} y1={midY + 3} x2={cx + 5} y2={midY + 3} stroke="#c0c0c0" strokeWidth={1.5} />
+      {/* Label above */}
+      <text x={x + w / 2} y={y - 3} textAnchor="middle" fontSize={5.5} fill="#aaa" fontWeight="bold" fontFamily="monospace">{label}</text>
+      {/* Sub-label below */}
+      <text x={x + w / 2} y={y + h + 7} textAnchor="middle" fontSize={4} fill="#666" fontFamily="monospace">Schottky</text>
+    </g>
+  );
+}
+
 
 // ── Markdown Preview Modal ──
 
@@ -559,7 +594,7 @@ function MarkdownPreview({ markdown, onClose, onDownload }) {
 }
 
 
-// ── Default wiring: 2x MG995-180 Servo Motors ──
+// ── Default wiring: 2x MG995-180 Servo Motors + 1N5819 Diode ──
 
 const DEFAULT_WIRES = [
   // Servo 1 (connector at f1–f3, jumpers from g1–g3 on same bus)
@@ -572,12 +607,16 @@ const DEFAULT_WIRES = [
   { from: { type: "cell", col: "g", row: 7 }, to: { type: "rail", rail: "left-", row: 7 }, color: "#8B5E3C", id: 6 },  // Brown - GND
   // Power distribution (GND only — 5V rail fed from external supply, not ESP32)
   { from: { type: "cell", col: "a", row: 30 }, to: { type: "rail", rail: "left-", row: 30 }, color: "#1a1a2e", id: 7 },  // GND to rail
+  // 1N5819 Schottky diode: external 5V → ESP32 5V (reverse-polarity protection)
+  { from: { type: "cell", col: "a", row: 28 }, to: { type: "rail", rail: "left+", row: 28 }, color: "#e53e3e", id: 8 },  // Anode to EXT 5V rail
+  { from: { type: "cell", col: "a", row: 28 }, to: { type: "cell", col: "a", row: 29 }, color: "#888", id: 9 },  // Diode internal (anode → cathode)
 ];
 
 const DEFAULT_LABELS = {
   "g1": "S1 SIG", "g2": "S1 VCC", "g3": "S1 GND",
   "g5": "S2 SIG", "g6": "S2 VCC", "g7": "S2 GND",
   "left-:30": "GND",
+  "a28": "D1 IN", "a29": "D1 OUT", "left+:28": "EXT 5V",
 };
 
 
@@ -595,6 +634,8 @@ export default function BreadboardApp() {
   const [history, setHistory] = useState([]);
   const [showPinRef, setShowPinRef] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
+  const [movingEndpoint, setMovingEndpoint] = useState(null); // { wireId, end: "from"|"to" }
+  const [hoveredEndpoint, setHoveredEndpoint] = useState(null); // "from" | "to" | null
   const [viewMode, setViewMode] = useState("board");
   const [showMdPreview, setShowMdPreview] = useState(false);
   const svgRef = useRef(null);
@@ -702,7 +743,7 @@ export default function BreadboardApp() {
   useEffect(() => {
     const handler = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "z") { e.preventDefault(); undo(); }
-      if (e.key === "Escape") { setWireStart(null); setLabelTarget(null); setCtxMenu(null); }
+      if (e.key === "Escape") { setWireStart(null); setLabelTarget(null); setCtxMenu(null); setMovingEndpoint(null); setHoveredEndpoint(null); }
     };
     const clickAway = () => setCtxMenu(null);
     window.addEventListener("keydown", handler);
@@ -713,6 +754,19 @@ export default function BreadboardApp() {
   const pointKey = (p) => p.type === "rail" ? `${p.rail}:${p.row}` : `${p.col}${p.row}`;
 
   const handleCellClick = (point) => {
+    if (movingEndpoint) {
+      const { wireId, end } = movingEndpoint;
+      const wire = wires.find((w) => w.id === wireId);
+      if (wire) {
+        const otherEnd = end === "from" ? "to" : "from";
+        if (pointKey(wire[otherEnd]) !== pointKey(point)) {
+          pushHistory();
+          setWires((w) => w.map((wr) => wr.id === wireId ? { ...wr, [end]: point } : wr));
+        }
+      }
+      setMovingEndpoint(null);
+      return;
+    }
     if (tool === "label") { setLabelTarget(point); setLabelInput(labels[pointKey(point)] || ""); return; }
     if (tool === "eraser") {
       pushHistory();
@@ -870,9 +924,9 @@ export default function BreadboardApp() {
           <span style={{ fontSize: 10, color: "#666", marginLeft: 4 }}>ESP32 LOLIN32</span>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          <button className={`tool-btn ${tool === "wire" ? "active" : ""}`} onClick={() => { setTool("wire"); setWireStart(null); }}>⚡ Wire</button>
-          <button className={`tool-btn ${tool === "label" ? "active" : ""}`} onClick={() => { setTool("label"); setWireStart(null); }}>🏷 Label</button>
-          <button className={`tool-btn ${tool === "eraser" ? "active" : ""}`} onClick={() => { setTool("eraser"); setWireStart(null); }}>🗑 Eraser</button>
+          <button className={`tool-btn ${tool === "wire" ? "active" : ""}`} onClick={() => { setTool("wire"); setWireStart(null); setMovingEndpoint(null); }}>⚡ Wire</button>
+          <button className={`tool-btn ${tool === "label" ? "active" : ""}`} onClick={() => { setTool("label"); setWireStart(null); setMovingEndpoint(null); }}>🏷 Label</button>
+          <button className={`tool-btn ${tool === "eraser" ? "active" : ""}`} onClick={() => { setTool("eraser"); setWireStart(null); setMovingEndpoint(null); }}>🗑 Eraser</button>
         </div>
         {tool === "wire" && (
           <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
@@ -899,6 +953,7 @@ export default function BreadboardApp() {
         <span>{wires.length} wire{wires.length !== 1 ? "s" : ""}</span>
         <span>{Object.keys(labels).length} label{Object.keys(labels).length !== 1 ? "s" : ""}</span>
         {wireStart && <span style={{ color: "#ffd700" }}>Click second point to complete wire from {pointKey(wireStart)} (Esc to cancel)</span>}
+        {movingEndpoint && <span style={{ color: "#4ade80" }}>Click a point to move the {movingEndpoint.end === "from" ? "start" : "end"} of the wire (Esc to cancel)</span>}
         {tool === "eraser" && <span style={{ color: "#e53e3e" }}>Click a hole to remove all wires/labels at that point</span>}
         {tool === "label" && <span style={{ color: "#805ad5" }}>Click any hole to add a label</span>}
       </div>
@@ -925,6 +980,7 @@ export default function BreadboardApp() {
             <ESP32Outline />
             <ServoConnector col="f" startRow={1} label="SERVO 1" />
             <ServoConnector col="f" startRow={5} label="SERVO 2" />
+            <DiodeComponent col="a" anodeRow={28} cathodeRow={29} label="1N5819" />
             {wires.map((w) => (
               <WirePath key={w.id} from={w.from} to={w.to} color={w.color}
                 isHovered={hoveredWire === w.id || (ctxMenu && ctxMenu.wireId === w.id)}
@@ -936,6 +992,24 @@ export default function BreadboardApp() {
               if (!pos) return null;
               return (<circle cx={pos.x} cy={pos.y} r={7} fill="none" stroke="#ffd700" strokeWidth={2} strokeDasharray="3,2">
                 <animate attributeName="r" values="7;10;7" dur="1s" repeatCount="indefinite" />
+              </circle>);
+            })()}
+            {movingEndpoint && (() => {
+              const wire = wires.find((w) => w.id === movingEndpoint.wireId);
+              if (!wire) return null;
+              const pos = getPointPos(wire[movingEndpoint.end]);
+              if (!pos) return null;
+              return (<circle cx={pos.x} cy={pos.y} r={7} fill="none" stroke="#4ade80" strokeWidth={2} strokeDasharray="3,2">
+                <animate attributeName="r" values="7;10;7" dur="1s" repeatCount="indefinite" />
+              </circle>);
+            })()}
+            {ctxMenu && hoveredEndpoint && (() => {
+              const wire = wires.find((w) => w.id === ctxMenu.wireId);
+              if (!wire) return null;
+              const pos = getPointPos(wire[hoveredEndpoint]);
+              if (!pos) return null;
+              return (<circle cx={pos.x} cy={pos.y} r={7} fill="none" stroke="#4ade80" strokeWidth={2.5}>
+                <animate attributeName="r" values="7;11;7" dur="0.8s" repeatCount="indefinite" />
               </circle>);
             })()}
             {renderLabels()}
@@ -1023,6 +1097,16 @@ export default function BreadboardApp() {
                   onMouseEnter={(e) => (e.currentTarget.style.transform = "scale(1.2)")}
                   onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")} />
               ))}
+            </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              <button onClick={() => { setHoveredEndpoint(null); setMovingEndpoint({ wireId: ctxMenu.wireId, end: "from" }); setCtxMenu(null); setWireStart(null); }}
+                style={{ flex: 1, padding: "6px 0", background: "transparent", border: "1px solid #4ade8044", borderRadius: 6, color: "#4ade80", cursor: "pointer", fontSize: 11, fontFamily: "inherit", transition: "background 0.1s" }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#4ade8018"; setHoveredEndpoint("from"); }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; setHoveredEndpoint(null); }}>Move start ({pointKey(wire.from)})</button>
+              <button onClick={() => { setHoveredEndpoint(null); setMovingEndpoint({ wireId: ctxMenu.wireId, end: "to" }); setCtxMenu(null); setWireStart(null); }}
+                style={{ flex: 1, padding: "6px 0", background: "transparent", border: "1px solid #4ade8044", borderRadius: 6, color: "#4ade80", cursor: "pointer", fontSize: 11, fontFamily: "inherit", transition: "background 0.1s" }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#4ade8018"; setHoveredEndpoint("to"); }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; setHoveredEndpoint(null); }}>Move end ({pointKey(wire.to)})</button>
             </div>
             <div style={{ borderTop: "1px solid #333", paddingTop: 8 }}>
               <button onClick={() => { deleteWire(ctxMenu.wireId); setCtxMenu(null); }}
